@@ -93,45 +93,81 @@ export default function Dashboard() {
   const [profEmail, setProfEmail] = useState('');
   const [profPhone, setProfPhone] = useState('');
   const [profLoyalty, setProfLoyalty] = useState('');
-  const [decryptProfiles, setDecryptProfiles] = useState(false);
 
-  // References
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const browserIntervals = useRef<Map<string, NodeJS.Timeout>>(new Map());
 
-  const backendUrl = 'http://localhost:3001';
-
   // Initialize and load configurations
   useEffect(() => {
-    // Detect operational mode by testing Fastify health endpoint
-    checkBackendHealth();
+    checkDeploymentMode();
     loadLocalProfiles();
     loadLocalSettings();
+    refreshData();
 
     // Register audio alert
     audioRef.current = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-500.wav');
 
+    // Run a periodic refresh for status logs
+    const statusPoll = setInterval(refreshData, 20000);
+
     return () => {
-      // Cleanup intervals
+      clearInterval(statusPoll);
       browserIntervals.current.forEach((intVal) => clearInterval(intVal));
     };
   }, []);
 
-  const checkBackendHealth = async () => {
+  const checkDeploymentMode = async () => {
     try {
-      const res = await fetch(`${backendUrl}/api/health`, { signal: AbortSignal.timeout(2000) });
+      const res = await fetch('/api/health');
       if (res.ok) {
-        setIsServerless(false);
-        fetchBackendStatus();
-        fetchBackendQueue();
+        setIsServerless(true); // Default Vercel serverless mode
       }
     } catch {
       setIsServerless(true);
-      console.log('🦁 GO LIONS: Backend offline/local not found. Running in standalone Serverless Mode.');
     }
   };
 
-  // --- Local / Standalone Storage and Scheduling (Vercel Mode) ---
+  const refreshData = async () => {
+    await fetchStatus();
+    await fetchQueueStatus();
+    await fetchHistory();
+  };
+
+  const fetchStatus = async () => {
+    try {
+      const res = await fetch('/api/monitor/status');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.monitors && data.monitors.length > 0) {
+          setMonitors(data.monitors);
+        }
+      }
+    } catch (err) {
+      console.error('Error fetching monitor status:', err);
+    }
+  };
+
+  const fetchQueueStatus = async () => {
+    try {
+      const res = await fetch('/api/queue/status');
+      if (res.ok) {
+        const data = await res.json();
+        setQueue(data);
+      }
+    } catch {}
+  };
+
+  const fetchHistory = async () => {
+    try {
+      const res = await fetch('/api/monitor/history');
+      if (res.ok) {
+        const data = await res.json();
+        setLogs(data || []);
+      }
+    } catch {}
+  };
+
+  // --- Local Profiles storage (highly secure local-only PII) ---
 
   const loadLocalProfiles = () => {
     const data = localStorage.getItem('golions_profiles');
@@ -164,6 +200,13 @@ export default function Dashboard() {
     setSlackUrl(slac);
     localStorage.setItem('golions_discord', disc);
     localStorage.setItem('golions_slack', slac);
+    
+    // Also sync to Vercel KV if available
+    fetch('/api/alerts/preferences', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ discordUrl: disc, slackUrl: slac })
+    }).catch(() => {});
   };
 
   // --- Search execution client-side (CORS-Proxy bypass) ---
@@ -186,14 +229,7 @@ export default function Dashboard() {
       searchPreferences: { showUnavailableEntries: false }
     };
 
-    // Parse raw custom headers
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json'
-    };
-
-    const parsedHeaders = parseRawHeadersText(rawHeaders);
-    Object.assign(headers, parsedHeaders);
+    const headers = parseRawHeadersText(rawHeaders);
 
     try {
       const response = await fetch('/api/proxy', {
@@ -239,13 +275,11 @@ export default function Dashboard() {
         responseTimeMs: elapsed
       };
 
-      // Play audio and send alerts on availability transition
       if (status === 'FLIGHTS_AVAILABLE') {
         audioRef.current?.play().catch(() => {});
         triggerWebhookAlerts(checkLog);
       }
 
-      // Update state
       setLogs((prev) => [checkLog, ...prev.slice(0, 50)]);
       setMonitors((prev) =>
         prev.map((m) =>
@@ -273,7 +307,7 @@ export default function Dashboard() {
     const alertBody = {
       embeds: [
         {
-          title: `🦁 GO LIONS: Flight Found CMN-BOS!`,
+          title: `🦁 GO LIONS: Flight Seats Discovered!`,
           description: `Discovered flight seats for ${log.route} on ${log.date}! Check availability immediately.`,
           color: 3066993,
           fields: [
@@ -319,24 +353,6 @@ export default function Dashboard() {
     return headers;
   };
 
-  // --- Backend Mode (Fastify Mode fallback) ---
-
-  const fetchBackendStatus = async () => {
-    try {
-      const res = await fetch(`${backendUrl}/api/monitor/status`);
-      const data = await res.json();
-      setMonitors(data.monitors || []);
-    } catch {}
-  };
-
-  const fetchBackendQueue = async () => {
-    try {
-      const res = await fetch(`${backendUrl}/api/queue/status`);
-      const data = await res.json();
-      setQueue(data);
-    } catch {}
-  };
-
   // --- General Form Actions ---
 
   const handleSaveHeaders = async () => {
@@ -344,33 +360,22 @@ export default function Dashboard() {
     setHeadersStatus('TESTING');
     localStorage.setItem('golions_headers', rawHeaders);
 
-    if (!isServerless) {
-      // Sync headers to Fastify server
-      try {
-        const res = await fetch(`${backendUrl}/api/session/headers`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ rawHeaders })
-        });
-        const data = await res.json();
-        if (res.ok) {
-          setHeadersStatus('SAVED');
-          if (data.queueState) setQueue(data.queueState);
-        } else {
-          setHeadersStatus('ERROR');
-        }
-      } catch {
+    // Save headers serverless-style in KV
+    try {
+      const res = await fetch('/api/session/headers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rawHeaders })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setHeadersStatus('SAVED');
+        if (data.queueState) setQueue(data.queueState);
+      } else {
         setHeadersStatus('ERROR');
       }
-    } else {
-      // Standalone (Vercel) Mode queue cookie parser check
-      setHeadersStatus('SAVED');
-      const isQueue = rawHeaders.includes('queueit') || rawHeaders.includes('QueueIT');
-      setQueue({
-        detected: isQueue,
-        provider: isQueue ? 'QUEUE_IT' : 'NONE',
-        lastUpdated: new Date().toISOString()
-      });
+    } catch {
+      setHeadersStatus('ERROR');
     }
   };
 
@@ -378,66 +383,69 @@ export default function Dashboard() {
     e.preventDefault();
     if (!route || !date) return;
 
-    if (!isServerless) {
-      // Local Fastify Server Monitor
-      try {
-        const res = await fetch(`${backendUrl}/api/monitor/start`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ route, date, interval })
-        });
-        if (res.ok) fetchBackendStatus();
-      } catch (err) {
-        console.error('Error starting backend monitor:', err);
+    // Send to Next.js API route to save in KV (for Vercel Cron usage)
+    try {
+      const res = await fetch('/api/monitor/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ route, date, interval })
+      });
+      if (res.ok) {
+        await refreshData();
       }
-    } else {
-      // Client-side Browser loop (Vercel Mode)
-      const key = `${route}_${date}`;
-      if (browserIntervals.current.has(key)) return;
-
-      const newMonitor: Monitor = {
-        route,
-        date,
-        interval,
-        enabled: true,
-        status: 'PENDING',
-        flightsFound: 0,
-        lastChecked: null
-      };
-
-      setMonitors((prev) => [...prev, newMonitor]);
-      
-      // Immediate execution
-      executeBrowserSearch(newMonitor);
-
-      // Set loop interval
-      const intVal = setInterval(() => {
-        executeBrowserSearch(newMonitor);
-      }, Math.max(interval, 10000));
-
-      browserIntervals.current.set(key, intVal);
+    } catch (err) {
+      console.error('Error starting monitor:', err);
     }
+
+    // Client-side Browser loop backup (Runs while tab is open)
+    const key = `${route}_${date}`;
+    if (browserIntervals.current.has(key)) return;
+
+    const newMonitor: Monitor = {
+      route,
+      date,
+      interval,
+      enabled: true,
+      status: 'PENDING',
+      flightsFound: 0,
+      lastChecked: null
+    };
+
+    setMonitors((prev) => {
+      const exists = prev.some((m) => m.route === route && m.date === date);
+      return exists ? prev : [...prev, newMonitor];
+    });
+
+    executeBrowserSearch(newMonitor);
+
+    const intVal = setInterval(() => {
+      executeBrowserSearch(newMonitor);
+    }, Math.max(interval, 10000));
+
+    browserIntervals.current.set(key, intVal);
   };
 
   const handleStopMonitor = async (mRoute: string, mDate: string) => {
-    if (!isServerless) {
-      try {
-        const res = await fetch(`${backendUrl}/api/monitor/stop`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ route: mRoute, date: mDate })
-        });
-        if (res.ok) fetchBackendStatus();
-      } catch {}
-    } else {
-      const key = `${mRoute}_${mDate}`;
-      const intVal = browserIntervals.current.get(key);
-      if (intVal) {
-        clearInterval(intVal);
-        browserIntervals.current.delete(key);
+    // Send stop request to Next.js API route (KV)
+    try {
+      const res = await fetch('/api/monitor/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ route: mRoute, date: mDate })
+      });
+      if (res.ok) {
+        await refreshData();
       }
-      setMonitors((prev) => prev.filter((m) => !(m.route === mRoute && m.date === mDate)));
+    } catch {}
+
+    // Stop browser loop
+    const key = `${mRoute}_${mDate}`;
+    const intVal = browserIntervals.current.get(key);
+    if (intVal) {
+      clearInterval(intVal);
+      browserIntervals.current.delete(key);
     }
+    setMonitors((prev) => prev.filter((m) => !(m.route === mRoute && m.date === mDate)));
   };
 
   const handleCreateProfile = async (e: React.FormEvent) => {
@@ -483,7 +491,7 @@ export default function Dashboard() {
       responseTimeMs: 150
     };
     await triggerWebhookAlerts(mockLog);
-    alert('Mock notification webhook dispatched, and native audio played.');
+    alert('Mock Webhook Alert sent successfully, and audio played.');
   };
 
   // Generate Sync Bookmarklet text

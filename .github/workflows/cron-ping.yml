@@ -1,0 +1,17 @@
+name: GO LIONS Search Monitor Trigger
+
+on:
+  schedule:
+    # Run approximately every 5 minutes (GitHub Actions cron limit)
+    - cron: '*/5 * * * *'
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  ping-cron:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Search Monitor Endpoint
+        run: |
+          # Replace with your Vercel URL
+          curl -X GET "https://golions.vercel.app/api/cron" \
+               -H "Accept: application/json"
