@@ -1,0 +1,47 @@
+{
+  "name": "golions-booking-intelligence-toolkit",
+  "version": "1.0.0",
+  "description": "GO LIONS Booking Intelligence Toolkit for Royal Air Maroc",
+  "main": "src/server/index.ts",
+  "scripts": {
+    "dev:server": "tsx watch src/server/index.ts",
+    "dev:frontend": "next dev -p 3000",
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:frontend\"",
+    "build:server": "tsc -p tsconfig.server.json",
+    "build:frontend": "next build",
+    "build": "npm run build:server && npm run build:frontend",
+    "start:server": "node dist/server/index.js",
+    "start:frontend": "next start",
+    "start": "concurrently \"npm run start:server\" \"npm run start:frontend\"",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@fastify/cors": "^9.0.1",
+    "@fastify/websocket": "^10.0.1",
+    "fastify": "^4.26.1",
+    "dotenv": "^16.4.5",
+    "next": "^14.1.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "uuid": "^9.0.1",
+    "pino": "^8.19.0",
+    "pino-pretty": "^10.3.1",
+    "node-notifier": "^10.0.1",
+    "lucide-react": "^0.344.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "@types/react": "^18.2.61",
+    "@types/react-dom": "^18.2.19",
+    "@types/uuid": "^9.0.8",
+    "@types/node-notifier": "^8.0.5",
+    "typescript": "^5.3.3",
+    "vitest": "^1.3.1",
+    "concurrently": "^8.2.2",
+    "tailwindcss": "^3.4.1",
+    "postcss": "^8.4.35",
+    "autoprefixer": "^10.4.18",
+    "tsx": "^4.7.1"
+  }
+}
