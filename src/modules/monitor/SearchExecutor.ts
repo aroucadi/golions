@@ -67,38 +67,72 @@ export class SearchExecutor {
   /**
    * Executes a search query using the Royal Air Maroc / Amadeus Search API.
    */
+  /**
+   * Automatically fetches a fresh OAuth token from the Amadeus serverless endpoint.
+   */
+  private async getFreshToken(): Promise<string | null> {
+    try {
+      const res = await fetch('https://api-des.royalairmaroc.com/v1/security/oauth2/token', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        },
+        body: new URLSearchParams({
+          client_id: 'HAhyLShylWJE1AEXRvJ41cF7oqbI7Gch',
+          client_secret: 'Wvd3imakms4XrKs7',
+          grant_type: 'client_credentials',
+          guest_office_id: 'CASAT08SC'
+        }).toString(),
+        signal: AbortSignal.timeout(5000)
+      });
+      if (res.ok) {
+        const data = (await res.json()) as any;
+        return data.access_token || null;
+      }
+    } catch (err) {
+      logger.error('[SearchExecutor] Failed to auto-refresh OAuth token:', err);
+    }
+    return null;
+  }
+
+  /**
+   * Executes a search query using the Royal Air Maroc / Amadeus Search API.
+   */
   public async executeSearch(config: MonitorConfig): Promise<FlightSearchResult> {
     return rateLimitGuard.guard(async () => {
       const start = Date.now();
       const [origin, destination] = config.route.split('-');
 
       const searchPayload = {
+        commercialFareFamilies: ['RAMNEWFF', 'RAMNEWFFBS'],
+        itineraries: [
+          {
+            originLocationCode: origin || 'CMN',
+            destinationLocationCode: destination || 'BOS',
+            departureDateTime: `${config.date}T00:00:00.000`,
+            isRequestedBound: true
+          }
+        ],
         travelers: [
           {
             passengerTypeCode: 'ADT'
           }
         ],
-        itineraries: [
-          {
-            originLocationCode: origin || 'CMN',
-            destinationLocationCode: destination || 'IAH',
-            departureDateTime: `${config.date}T00:00:00.000`,
-            isRequestedBound: true
-          }
-        ],
-        commercialFareFamilies: ['RAMNEWFF', 'RAMNEWFFBS'],
         searchPreferences: {
-          showUnavailableEntries: false
+          showSoldOut: true
         }
       };
 
-      const url = 'https://api-des.royalairmaroc.com/airlines/AT/v2/search/air-calendars';
+      const url = 'https://api-des.royalairmaroc.com/airlines/AT/v2/search/air-bounds?guestOfficeId=&language=en&useTest=false';
       let headers: Record<string, string> = {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Origin': 'https://digital.royalairmaroc.com',
-        'Referer': 'https://digital.royalairmaroc.com/'
+        'Referer': 'https://digital.royalairmaroc.com/',
+        'x-spa': '1'
       };
 
       if (this.rawHeadersText) {
@@ -117,14 +151,36 @@ export class SearchExecutor {
 
       const searchId = crypto.randomUUID();
 
-      try {
-        const response = await fetch(url, {
+      const makeRequest = async (authHeader?: string) => {
+        const requestHeaders = { ...headers };
+        if (authHeader) {
+          requestHeaders['Authorization'] = authHeader.startsWith('Bearer ') ? authHeader : `Bearer ${authHeader}`;
+        }
+        
+        return fetch(url, {
           method: 'POST',
-          headers,
-          body: JSON.stringify(searchPayload)
+          headers: requestHeaders,
+          body: JSON.stringify(searchPayload),
+          signal: AbortSignal.timeout(10000)
         });
+      };
 
-        const elapsed = Date.now() - start;
+      try {
+        let response = await makeRequest();
+        let elapsed = Date.now() - start;
+
+        // Auto-heal on 401 Unauthorized (expired token)
+        if (response.status === 401) {
+          logger.info('[SearchExecutor] Detected 401 Unauthorized. Attempting automatic token refresh...');
+          const freshToken = await this.getFreshToken();
+          if (freshToken) {
+            logger.info('[SearchExecutor] Fresh OAuth token obtained. Retrying search request...');
+            // Cache the token locally
+            this.activeToken = freshToken;
+            response = await makeRequest(freshToken);
+            elapsed = Date.now() - start;
+          }
+        }
 
         if (response.status === 429) {
           logger.warn(`[SearchExecutor] Rate limited by upstream server (429)`);
@@ -143,7 +199,6 @@ export class SearchExecutor {
         const data = await response.json().catch(() => null);
 
         if (!response.ok) {
-          // Check for specific RAM error code 7959 (NO FLIGHTS FOUND)
           if (data && Array.isArray(data.errors)) {
             const hasNoFlightsErr = data.errors.some(
               (err: any) => err.code === '7959' || (err.detail && err.detail.includes('NO AVAILABLE FLIGHT'))
@@ -170,23 +225,20 @@ export class SearchExecutor {
             route: config.route,
             date: config.date,
             status: 'ERROR',
-            flightsFound: 0,
             rawResponse: data || { error: `HTTP ${response.status}` },
+            flightsFound: 0,
             responseTimeMs: elapsed,
             changeDetected: false
           };
         }
 
-        // Count flights in response
         let flightsFound = 0;
         if (data && data.airCalendarBounds) {
-          // Amadeus air-calendars structure parses flight bounds
           flightsFound = Array.isArray(data.airCalendarBounds) ? data.airCalendarBounds.length : 0;
         } else if (data && data.itineraries) {
           flightsFound = Array.isArray(data.itineraries) ? data.itineraries.length : 0;
         } else if (data) {
-          // General fallback check: if success is returned or array elements exist
-          flightsFound = 1; // Assume flights are available
+          flightsFound = 1;
         }
 
         const status = flightsFound > 0 ? 'FLIGHTS_AVAILABLE' : 'NO_FLIGHTS';
